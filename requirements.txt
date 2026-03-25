@@ -1,0 +1,17 @@
+boto3==1.42.73
+duckdb==1.5.1
+exchange_calendars==4.13.2
+fredapi==0.5.2
+joblib==1.5.3
+mlflow==3.10.1
+numpy==2.4.3
+pandas==2.3.3
+plotly==6.6.0
+pyarrow==23.0.1
+python-dotenv==1.2.2
+ruptures==1.1.10
+scikit-learn==1.8.0
+scipy==1.17.1
+shap==0.51.0
+streamlit==1.55.0
+yfinance==1.2.0
