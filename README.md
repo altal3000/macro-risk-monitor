@@ -2,7 +2,9 @@
 
 Daily anomaly detection for energy markets. Monitors 21 signals across oil and gas prices, equity markets, macroeconomic indicators, and geopolitical risk to detect unusual market conditions as they emerge.
 
-**[Live Dashboard →](your-streamlit-url)**
+**[Live Dashboard →](https://macro-risk-monitor.streamlit.app/)**
+
+![Dashboard](assets/dashboard.png)
 
 ---
 
