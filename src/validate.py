@@ -18,6 +18,15 @@ S3_BUCKET = "macro-risk-monitor"
 s3 = boto3.client("s3")
 TODAY = datetime.today().strftime("%Y-%m-%d")
 
+def get_last_trading_day() -> str:
+    cal = xcals.get_calendar("XNYS")
+    check = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+    while not cal.is_session(check):
+        check -= pd.Timedelta(days=1)
+    return check.strftime("%Y-%m-%d")
+
+LAST_TRADING_DAY = get_last_trading_day()
+
 CRITICAL = "CRITICAL"
 WARNING  = "WARNING"
 INFO     = "INFO"
@@ -58,12 +67,12 @@ def check_critical(df: pd.DataFrame, is_trading_day: bool) -> list:
     if len(df) == 0:
         failures.append("COMPLETENESS: zero rows")
 
-    # Multi-day gap on trading days
+    # Multi-day gap — last data date should match last trading day
     if is_trading_day:
         last_date = df.index.max()
-        gap = (pd.Timestamp(TODAY) - last_date).days
-        if gap > 2:
-            failures.append(f"GAP: last date is {last_date.date()}, gap={gap} days")
+        gap = (pd.Timestamp(LAST_TRADING_DAY) - last_date).days
+        if gap > 1:
+            failures.append(f"GAP: last date is {last_date.date()}, expected {LAST_TRADING_DAY}")
 
     # Cross-source consistency
     if is_trading_day and len(df) > 0:
@@ -107,14 +116,11 @@ def compute_quality_score(warnings: list) -> float:
 
 # Main gate
 def run_gate(df: pd.DataFrame, failures: list, warnings: list) -> pd.DataFrame:
-    # Write quality metadata back to dataframe
     score = compute_quality_score(warnings)
     flags = "|".join(warnings) if warnings else ""
-
     df["data_quality_score"] = score
     df["data_quality_flags"] = flags
     df["is_trading_day"] = check_trading_day()
-
     return df
 
 # Save to S3
@@ -126,12 +132,11 @@ def save_features(df: pd.DataFrame) -> None:
 
 # --- Run validation gate ---
 if __name__ == "__main__":
-    logger.info(f"Starting validation — {TODAY}")
+    logger.info(f"Starting validation — {TODAY}, last trading day: {LAST_TRADING_DAY}")
 
     df = load_features()
     is_trading_day = check_trading_day()
 
-    # Critical checks
     failures = check_critical(df, is_trading_day)
     if failures:
         for f in failures:
@@ -139,17 +144,14 @@ if __name__ == "__main__":
         logger.error("Validation failed — halting pipeline")
         sys.exit(1)
 
-    # Warning checks
     warnings = check_warnings(df)
     for w in warnings:
         logger.warning(f"WARNING: {w}")
 
-    # Info
     gpr_days = int(df["gpr_days_stale"].iloc[-1])
     logger.info(f"GPR lag: {gpr_days} days")
     logger.info(f"Quality score: {compute_quality_score(warnings):.2f}")
 
-    # Write quality metadata and save
     df = run_gate(df, failures, warnings)
     save_features(df)
 

@@ -36,6 +36,11 @@ st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
 
+    hr {
+        margin-top: 1rem !important;
+        margin-bottom: 1rem !important;
+    }
+
     /* Buttons */
     button[kind="primary"] {
         background-color: #444 !important;

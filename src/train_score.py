@@ -11,6 +11,7 @@ import mlflow.sklearn
 import shap
 from sklearn.ensemble import IsolationForest
 import ruptures as rpt
+import exchange_calendars as xcals
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +23,15 @@ S3_BUCKET = "macro-risk-monitor"
 s3 = boto3.client("s3")
 TODAY = datetime.today().strftime("%Y-%m-%d")
 DB_PATH = "macro_risk_monitor.duckdb"
+
+def get_last_trading_day() -> str:
+    cal = xcals.get_calendar("XNYS")
+    check = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+    while not cal.is_session(check):
+        check -= pd.Timedelta(days=1)
+    return check.strftime("%Y-%m-%d")
+
+LAST_TRADING_DAY = get_last_trading_day()
 
 PRICE_BLOCK  = ["brent_ret_1d","brent_ret_5d","wti_ret_1d","brent_wti_spread",
                 "brent_vol_20d","ng_ret_1d","xle_ret_1d","xle_brent_ratio",
@@ -70,14 +80,8 @@ def fit_isolation_forest(df: pd.DataFrame, features: list) -> tuple:
     )
     iso.fit(X, sample_weight=weights)
 
-    # Raw decision function — negative = anomalous, positive = normal
-    # Invert so higher = more anomalous, then z-score normalise
-    # This avoids anchoring to historical extremes
     scores = -iso.decision_function(X)
     scores_norm = (scores - scores.mean()) / scores.std()
-
-    # Shift to positive range — mean becomes 0, std = 1
-    # Add offset so normal days are near 0, anomalies are positive
     scores_norm = scores_norm - scores_norm.min()
 
     logger.info(f"IsolationForest fitted on {len(features)} features, "
@@ -159,18 +163,15 @@ def compute_anomaly_flags(risk_score: pd.Series) -> pd.DataFrame:
                 f"qtr: {flags['anomaly_qtr'].mean():.3f}")
     return flags
 
-# --- SHAP + z-score — full matrix, one row per day ---
+# --- SHAP + z-score attribution ---
 def compute_shap(iso: IsolationForest, df: pd.DataFrame, features: list,
                  scores_z_raw: pd.DataFrame) -> pd.DataFrame:
-    
-    # IF component — SHAP (weighted by 0.4)
+
     explainer = shap.TreeExplainer(iso)
     shap_values = np.abs(explainer.shap_values(df[features].values))
     shap_df = pd.DataFrame(shap_values, index=df.index, columns=features)
-    # Normalise per row then weight
     shap_norm = shap_df.div(shap_df.sum(axis=1), axis=0) * 0.4
 
-    # Z-score component — per-feature absolute z-score (weighted by 0.35)
     def rolling_zscore(series):
         mu = series.rolling(60).mean()
         sigma = series.rolling(60).std().clip(lower=1e-6)
@@ -178,11 +179,8 @@ def compute_shap(iso: IsolationForest, df: pd.DataFrame, features: list,
 
     z_abs = scores_z_raw.apply(rolling_zscore).abs()
     z_norm = z_abs.div(z_abs.sum(axis=1), axis=0).fillna(0) * 0.35
-
-    # Align to same features
     z_norm = z_norm.reindex(columns=features, fill_value=0)
 
-    # Combined attribution — 75% of score explained
     combined = shap_norm.add(z_norm, fill_value=0)
 
     today_top = combined.iloc[-1].sort_values(ascending=False)
@@ -192,9 +190,8 @@ def compute_shap(iso: IsolationForest, df: pd.DataFrame, features: list,
 # --- DuckDB setup ---
 def setup_duckdb() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(DB_PATH)
-    con.execute("DROP TABLE IF EXISTS risk_scores")
     con.execute("""
-        CREATE TABLE risk_scores (
+        CREATE TABLE IF NOT EXISTS risk_scores (
             date                DATE PRIMARY KEY,
             risk_score          FLOAT,
             anomaly_static      BOOLEAN,
@@ -250,7 +247,7 @@ if __name__ == "__main__":
     parser.add_argument("--backfill", action="store_true", help="Score all historical rows")
     args = parser.parse_args()
 
-    logger.info(f"Starting train/score — {TODAY}")
+    logger.info(f"Starting train/score — {TODAY}, scoring for {LAST_TRADING_DAY}")
 
     df = load_features()
     quality_flags = df["data_quality_flags"].iloc[-1]
@@ -265,7 +262,7 @@ if __name__ == "__main__":
 
         risk_score = ensemble(scores_if, scores_z, scores_cp)
         flags      = compute_anomaly_flags(risk_score)
-        shap_df = compute_shap(iso, df, reduced_features, df[reduced_features])
+        shap_df    = compute_shap(iso, df, reduced_features, df[reduced_features])
 
         mlflow.log_param("features_if", reduced_features)
         mlflow.log_param("contamination", 0.05)
@@ -302,9 +299,11 @@ if __name__ == "__main__":
                 )
             logger.info(f"Backfill complete — {len(df)} rows written")
         else:
+            # Use LAST_TRADING_DAY as the date — not the pipeline run date
+            # Score is taken from the last row of the feature window
             write_record(
                 con=con,
-                date=TODAY,
+                date=LAST_TRADING_DAY,
                 risk_score=float(risk_score.iloc[-1]),
                 anomaly_static=bool(flags["anomaly_static"].iloc[-1]),
                 anomaly_5y=bool(flags["anomaly_5y"].iloc[-1]),
@@ -322,4 +321,3 @@ if __name__ == "__main__":
         con.close()
 
     logger.info("Train/score complete")
-
