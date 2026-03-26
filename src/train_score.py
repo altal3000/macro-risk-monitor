@@ -54,7 +54,6 @@ def load_features() -> pd.DataFrame:
     s3.download_file(S3_BUCKET, "features/features_window.parquet", "/tmp/features_window.parquet")
     df = pd.read_parquet("/tmp/features_window.parquet")
     df.index = pd.to_datetime(df.index)
-    df = df.dropna(subset=ALL_FEATURES)
     logger.info(f"Loaded features: {df.shape}")
     return df
 
@@ -249,20 +248,22 @@ if __name__ == "__main__":
 
     logger.info(f"Starting train/score — {TODAY}, scoring for {LAST_TRADING_DAY}")
 
-    df = load_features()
-    quality_flags = df["data_quality_flags"].iloc[-1]
-    gpr_is_stale  = bool(df["gpr_is_stale"].iloc[-1])
+    df_full  = load_features()                          # full window including NaN rows
+    df_train = df_full.dropna(subset=ALL_FEATURES)      # clean rows for model training
+
+    quality_flags = df_full["data_quality_flags"].iloc[-1]
+    gpr_is_stale  = bool(df_full["gpr_is_stale"].iloc[-1])
 
     with mlflow.start_run():
-        reduced_features = reduce_features(df)
+        reduced_features = reduce_features(df_train)
 
-        iso, scores_if = fit_isolation_forest(df, reduced_features)
-        scores_z       = compute_zscore_signal(df)
-        scores_cp      = compute_changepoint_signal(df)
+        iso, scores_if = fit_isolation_forest(df_train, reduced_features)
+        scores_z       = compute_zscore_signal(df_train)
+        scores_cp      = compute_changepoint_signal(df_train)
 
         risk_score = ensemble(scores_if, scores_z, scores_cp)
         flags      = compute_anomaly_flags(risk_score)
-        shap_df    = compute_shap(iso, df, reduced_features, df[reduced_features])
+        shap_df    = compute_shap(iso, df_train, reduced_features, df_train[reduced_features])
 
         mlflow.log_param("features_if", reduced_features)
         mlflow.log_param("contamination", 0.05)
@@ -278,7 +279,7 @@ if __name__ == "__main__":
 
         if args.backfill:
             logger.info("Backfilling all historical scores...")
-            for date in df.index:
+            for date in df_train.index:
                 date_str = date.strftime("%Y-%m-%d")
                 write_record(
                     con=con,
@@ -292,30 +293,36 @@ if __name__ == "__main__":
                     scores_z=float(scores_z.loc[date]),
                     scores_cp=float(scores_cp.loc[date]),
                     top_drivers=shap_df.loc[date],
-                    quality_flags=str(df.loc[date, "data_quality_flags"]),
-                    gpr_is_stale=bool(df.loc[date, "gpr_is_stale"]),
+                    quality_flags=str(df_full.loc[date, "data_quality_flags"]),
+                    gpr_is_stale=bool(df_full.loc[date, "gpr_is_stale"]),
                     model_version=run_id
                 )
-            logger.info(f"Backfill complete — {len(df)} rows written")
+            logger.info(f"Backfill complete — {len(df_train)} rows written")
         else:
-            # Use LAST_TRADING_DAY as the date — not the pipeline run date
-            # Score is taken from the last row of the feature window
+            # Find the score for LAST_TRADING_DAY
+            # If it was dropped due to NaN, use the last available scored date
+            score_date = pd.Timestamp(LAST_TRADING_DAY)
+            if score_date not in risk_score.index:
+                score_date = risk_score.index[-1]
+                logger.warning(f"LAST_TRADING_DAY {LAST_TRADING_DAY} not in scored data — using {score_date.date()}")
+
             write_record(
                 con=con,
-                date=LAST_TRADING_DAY,
-                risk_score=float(risk_score.iloc[-1]),
-                anomaly_static=bool(flags["anomaly_static"].iloc[-1]),
-                anomaly_5y=bool(flags["anomaly_5y"].iloc[-1]),
-                anomaly_1y=bool(flags["anomaly_1y"].iloc[-1]),
-                anomaly_qtr=bool(flags["anomaly_qtr"].iloc[-1]),
-                scores_if=float(scores_if.iloc[-1]),
-                scores_z=float(scores_z.iloc[-1]),
-                scores_cp=float(scores_cp.iloc[-1]),
-                top_drivers=shap_df.iloc[-1],
+                date=score_date.strftime("%Y-%m-%d"),
+                risk_score=float(risk_score.loc[score_date]),
+                anomaly_static=bool(flags.loc[score_date, "anomaly_static"]),
+                anomaly_5y=bool(flags.loc[score_date, "anomaly_5y"]),
+                anomaly_1y=bool(flags.loc[score_date, "anomaly_1y"]),
+                anomaly_qtr=bool(flags.loc[score_date, "anomaly_qtr"]),
+                scores_if=float(scores_if.loc[score_date]),
+                scores_z=float(scores_z.loc[score_date]),
+                scores_cp=float(scores_cp.loc[score_date]),
+                top_drivers=shap_df.loc[score_date],
                 quality_flags=quality_flags,
                 gpr_is_stale=gpr_is_stale,
                 model_version=run_id
             )
+            logger.info(f"Written score for {score_date.date()}")
 
         con.close()
 

@@ -35,8 +35,10 @@ def compute_price_features(df_yf: pd.DataFrame, df_fred: pd.DataFrame) -> pd.Dat
     f = pd.DataFrame(index=df_yf.index)
     prices = df_yf.clip(lower=1e-6)
 
-    # Brent from FRED — reindex to yfinance index, ffill gaps
-    brent = df_fred["brent"].reindex(df_yf.index).ffill().clip(lower=1e-6)
+    # Brent: yfinance BZ=F for recent data, FRED DCOILBRENTEU for historical
+    brent_yf   = prices["BZ=F"].where(prices["BZ=F"] > 1e-6)
+    brent_fred = df_fred["brent"].reindex(df_yf.index).ffill().clip(lower=1e-6)
+    brent      = brent_yf.combine_first(brent_fred)
 
     f["brent_ret_1d"]     = np.log(brent / brent.shift(1))
     f["brent_ret_5d"]     = np.log(brent / brent.shift(5))
