@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime
+import sys
 
 import boto3
 import pandas as pd
@@ -122,11 +123,25 @@ def load_existing_features() -> pd.DataFrame:
 
 # --- Engineer features ---
 if __name__ == "__main__":
+    import sys
     logger.info(f"Starting feature engineering — {TODAY}")
 
     df_yf   = read_from_s3("yfinance")
     df_fred = read_from_s3("fred")
     df_gpr  = read_from_s3("gpr")
+
+    # If FRED failed — preserve existing features and exit cleanly
+    if df_fred.empty:
+        logger.warning("FRED data unavailable — preserving existing features window")
+        existing = load_existing_features()
+        if not existing.empty:
+            existing.to_parquet("/tmp/features_window.parquet")
+            s3.upload_file("/tmp/features_window.parquet", S3_BUCKET, "features/features_window.parquet")
+            logger.info("Saved existing features unchanged")
+        else:
+            logger.error("No existing features to fall back to — pipeline cannot continue")
+            sys.exit(1)
+        sys.exit(0)
 
     price_f = compute_price_features(df_yf, df_fred)
     macro_f = compute_macro_features(df_fred)

@@ -73,19 +73,23 @@ FRED_SERIES = {
 
 def fetch_fred() -> pd.DataFrame:
     logger.info("Fetching FRED data...")
-    try:
-        fred = Fred(api_key=FRED_API_KEY)
-        series = {}
-        for name, series_id in FRED_SERIES.items():
-            s = fred.get_series(series_id, observation_start="2007-01-01")
-            series[name] = s
-        df = pd.DataFrame(series)
-        df.index = pd.to_datetime(df.index).tz_localize(None)
-        logger.info(f"FRED: {len(df)} rows fetched")
-        return df
-    except Exception as e:
-        logger.warning(f"FRED fetch failed: {e}")
-        return pd.DataFrame()
+    for attempt in range(3):
+        try:
+            fred = Fred(api_key=FRED_API_KEY)
+            series = {}
+            for name, series_id in FRED_SERIES.items():
+                s = fred.get_series(series_id, observation_start="2007-01-01")
+                series[name] = s
+            df = pd.DataFrame(series)
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            logger.info(f"FRED: {len(df)} rows fetched")
+            return df
+        except Exception as e:
+            logger.warning(f"FRED fetch attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                import time
+                time.sleep(5)
+    return pd.DataFrame()
 
 # Fetch GPR data
 GPR_URL = "https://www.matteoiacoviello.com/ai_gpr_files/ai_gpr_data_daily.csv"
