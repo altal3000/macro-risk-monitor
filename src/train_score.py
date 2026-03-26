@@ -320,4 +320,8 @@ if __name__ == "__main__":
 
         con.close()
 
+        # Upload DuckDB to S3
+        s3.upload_file(DB_PATH, S3_BUCKET, "macro_risk_monitor.duckdb")
+        logger.info("DuckDB uploaded to S3")
+
     logger.info("Train/score complete")

@@ -55,12 +55,3 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION:    ${{ secrets.AWS_DEFAULT_REGION }}
         run: python src/train_score.py
-
-      - name: Commit updated DuckDB
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
-          git add macro_risk_monitor.duckdb
-          git diff --staged --quiet || git commit -m "Daily update $(date +'%Y-%m-%d')"
-          git push --force-with-lease

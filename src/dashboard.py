@@ -57,9 +57,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def load_data() -> pd.DataFrame:
-    con = duckdb.connect(DB_PATH, read_only=True)
+    import boto3
+    s3 = boto3.client("s3")
+    s3.download_file("macro-risk-monitor", "macro_risk_monitor.duckdb", "/tmp/macro_risk_monitor.duckdb")
+    con = duckdb.connect("/tmp/macro_risk_monitor.duckdb", read_only=True)
     df = con.execute("SELECT * FROM risk_scores ORDER BY date").fetchdf()
     con.close()
     df["date"] = pd.to_datetime(df["date"])
