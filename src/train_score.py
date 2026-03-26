@@ -272,7 +272,6 @@ if __name__ == "__main__":
         mlflow.log_metric("mean_risk_score", float(risk_score.mean()))
         mlflow.log_metric("anomaly_rate_static", float(flags["anomaly_static"].mean()))
         mlflow.log_metric("anomaly_rate_1y", float(flags["anomaly_1y"].mean()))
-        mlflow.sklearn.log_model(iso, "isolation_forest")
         run_id = mlflow.active_run().info.run_id
 
         con = setup_duckdb()
