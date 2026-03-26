@@ -279,7 +279,10 @@ if __name__ == "__main__":
 
         if args.backfill:
             logger.info("Backfilling all historical scores...")
+            last_td = pd.Timestamp(LAST_TRADING_DAY)
             for date in df_train.index:
+                if date > last_td:
+                    continue  # skip today and future dates
                 date_str = date.strftime("%Y-%m-%d")
                 write_record(
                     con=con,
