@@ -75,14 +75,14 @@ def compute_macro_features(df_fred: pd.DataFrame) -> pd.DataFrame:
     return f
 
 # --- Compute geopolitical features ---
-def compute_geo_features(df_gpr: pd.DataFrame, ovx_zscore: pd.Series) -> pd.DataFrame:
+def compute_geo_features(df_gpr: pd.DataFrame, ovx_zscore: pd.Series) -> tuple:
     f = pd.DataFrame(index=df_gpr.index)
 
     days_stale = int(df_gpr["gpr_days_stale"].iloc[-1])
-    is_stale = bool(df_gpr["gpr_is_stale"].iloc[-1])
+    is_stale   = bool(df_gpr["gpr_is_stale"].iloc[-1])
 
-    gpr_weight = 0.95 ** days_stale
-    gpr_decayed = gpr_weight * df_gpr["GPR_AI"] + (1 - gpr_weight) * 100
+    gpr_weight    = 0.95 ** days_stale
+    gpr_decayed   = gpr_weight * df_gpr["GPR_AI"] + (1 - gpr_weight) * 100
     ovx_component = (1 - gpr_weight) * ovx_zscore.reindex(df_gpr.index) * 30
 
     f["geo_signal"]     = gpr_decayed + ovx_component
@@ -90,17 +90,17 @@ def compute_geo_features(df_gpr: pd.DataFrame, ovx_zscore: pd.Series) -> pd.Data
         (df_gpr["GPR_OIL"] - df_gpr["GPR_OIL"].rolling(60).mean())
         / df_gpr["GPR_OIL"].rolling(60).std()
     )
-    f["gpr_is_stale"]   = is_stale
-    f["gpr_days_stale"] = days_stale
 
     logger.info(f"Geo features: {f.shape}")
-    return f
+    return f, days_stale, is_stale
 
 # --- Align all features ---
 def align_features(
     price_f: pd.DataFrame,
     macro_f: pd.DataFrame,
-    geo_f: pd.DataFrame
+    geo_f: pd.DataFrame,
+    days_stale: int,
+    is_stale: bool
 ) -> pd.DataFrame:
     combined = pd.concat([price_f, macro_f, geo_f], axis=1, sort=True)
     combined = combined.sort_index()
@@ -109,6 +109,8 @@ def align_features(
     combined["is_trading_day"]     = True
     combined["data_quality_score"] = 1.0
     combined["data_quality_flags"] = ""
+    combined["gpr_is_stale"]       = is_stale
+    combined["gpr_days_stale"]     = days_stale
     logger.info(f"Aligned features: {combined.shape}")
     return combined
 
@@ -147,9 +149,9 @@ if __name__ == "__main__":
 
     price_f = compute_price_features(df_yf, df_fred)
     macro_f = compute_macro_features(df_fred)
-    geo_f   = compute_geo_features(df_gpr, price_f["ovx_zscore"])
+    geo_f, days_stale, is_stale = compute_geo_features(df_gpr, price_f["ovx_zscore"])
 
-    features = align_features(price_f, macro_f, geo_f)
+    features = align_features(price_f, macro_f, geo_f, days_stale, is_stale)
 
     # Merge with existing — only append new dates, never overwrite
     existing = load_existing_features()

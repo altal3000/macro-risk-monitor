@@ -38,7 +38,7 @@ PRICE_BLOCK  = ["brent_ret_1d","brent_ret_5d","wti_ret_1d","brent_wti_spread",
                 "ovx_zscore","vix_zscore"]
 MACRO_BLOCK  = ["yield_curve","yield_curve_chg_20d","dxy_zscore","hy_spread",
                 "hy_spread_chg_5d","fed_rate","cpi_yoy"]
-GEO_BLOCK    = ["geo_signal","gpr_oil_zscore","gpr_is_stale","gpr_days_stale"]
+GEO_BLOCK    = ["geo_signal","gpr_oil_zscore"]
 ALL_FEATURES = PRICE_BLOCK + MACRO_BLOCK + GEO_BLOCK
 
 ROLLING_WINDOWS = {
