@@ -54,6 +54,7 @@ def load_features() -> pd.DataFrame:
     s3.download_file(S3_BUCKET, "features/features_window.parquet", "/tmp/features_window.parquet")
     df = pd.read_parquet("/tmp/features_window.parquet")
     df.index = pd.to_datetime(df.index)
+    df = df.ffill()  # fill rolling warm-up nulls on recent rows
     logger.info(f"Loaded features: {df.shape}")
     return df
 
