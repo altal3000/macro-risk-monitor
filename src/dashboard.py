@@ -41,7 +41,6 @@ st.markdown("""
         margin-bottom: 1rem !important;
     }
 
-    /* Buttons */
     button[kind="primary"] {
         background-color: #444 !important;
         border-color: #444 !important;
@@ -84,52 +83,80 @@ st.divider()
 # --- Energy Market Stress Index ---
 st.subheader("Energy Market Stress Index")
 
-def get_bar_colour(pct: float) -> str:
-    if pct >= 95:   return "#d32f2f"
-    elif pct >= 80: return "#f57c00"
-    elif pct >= 60: return "#f9a825"
-    else:           return "#2e7d32"
-
-def get_tab_emoji(pct: float) -> str:
-    if pct >= 95:   return "🔴"
-    elif pct >= 80: return "🟠"
-    elif pct >= 60: return "🟡"
-    else:           return "🟢"
-
 score = float(latest["risk_score"])
 
-windows = {
-    "Quarter":    (df[df["date"] >= df["date"].max() - pd.DateOffset(months=3)]["risk_score"], bool(latest["anomaly_qtr"])),
-    "1-year":     (df[df["date"] >= df["date"].max() - pd.DateOffset(years=1)]["risk_score"],  bool(latest["anomaly_1y"])),
-    "5-year":     (df[df["date"] >= df["date"].max() - pd.DateOffset(years=5)]["risk_score"],  bool(latest["anomaly_5y"])),
-    "Historical": (df["risk_score"], bool(latest["anomaly_static"])),
+# Stored thresholds from model — single source of truth
+stored_thresholds = {
+    "Quarter":    float(latest["threshold_qtr"]),
+    "1-year":     float(latest["threshold_1y"]),
+    "5-year":     float(latest["threshold_5y"]),
+    "Historical": float(latest["threshold_static"]),
 }
 
+# Stored anomaly flags — single source of truth
+is_anomaly = {
+    "Quarter":    bool(latest["anomaly_qtr"]),
+    "1-year":     bool(latest["anomaly_1y"]),
+    "5-year":     bool(latest["anomaly_5y"]),
+    "Historical": bool(latest["anomaly_static"]),
+}
+
+# Score series per window for percentile rank calculation
+windows = {
+    "Quarter":    df[df["date"] >= df["date"].max() - pd.DateOffset(months=3)]["risk_score"],
+    "1-year":     df[df["date"] >= df["date"].max() - pd.DateOffset(years=1)]["risk_score"],
+    "5-year":     df[df["date"] >= df["date"].max() - pd.DateOffset(years=5)]["risk_score"],
+    "Historical": df["risk_score"],
+}
+
+# Percentile rank of today's score in each window
 pcts = {
     label: round((series < score).mean() * 100, 1)
-    for label, (series, _) in windows.items()
+    for label, series in windows.items()
 }
 
-anomalous_windows = [label for label, (_, flag) in windows.items() if flag]
+# Percentile rank of the stored threshold in each window — this is where the red line sits
+threshold_pcts = {
+    label: round((series < stored_thresholds[label]).mean() * 100, 1)
+    for label, series in windows.items()
+}
+
+def get_bar_colour(pct: float, threshold_pct: float) -> str:
+    diff = threshold_pct - pct
+    if pct >= threshold_pct:          return "#d32f2f"
+    elif diff <= threshold_pct * 0.1: return "#f57c00"
+    elif diff <= threshold_pct * 0.3: return "#f9a825"
+    else:                             return "#2e7d32"
+
+def get_tab_emoji(label: str) -> str:
+    if is_anomaly[label]:   return "🔴"
+    pct = pcts[label]
+    tpct = threshold_pcts[label]
+    diff = tpct - pct
+    if diff <= tpct * 0.1:  return "🟠"
+    elif diff <= tpct * 0.3: return "🟡"
+    else:                    return "🟢"
+
+anomalous_windows = [label for label, flagged in is_anomaly.items() if flagged]
 if anomalous_windows:
     st.error(f"⚠️ Anomaly detected — {', '.join(anomalous_windows)} indicator{'s' if len(anomalous_windows) > 1 else ''} above threshold")
 
-tab_labels = [f"{get_tab_emoji(pcts[label])} {label}" for label in windows]
+tab_labels = [f"{get_tab_emoji(label)} {label}" for label in windows]
 
 col_gauge, col_drivers = st.columns([1, 1])
 
 with col_gauge:
     tabs = st.tabs(tab_labels)
-    for tab, (label, (series, is_anomaly)) in zip(tabs, windows.items()):
+    for tab, label in zip(tabs, windows.keys()):
         with tab:
             pct = pcts[label]
-            bar_colour = get_bar_colour(pct)
+            threshold_pct = threshold_pcts[label]
+            bar_colour = get_bar_colour(pct, threshold_pct)
             fig = go.Figure(go.Indicator(
                 mode="gauge",
                 value=pct,
                 gauge={
                     "axis": {"range": [0, 100]},
-                    "threshold": {"line": {"color": "#d32f2f", "width": 2}, "thickness": 0.75, "value": 95},
                     "bar": {"color": bar_colour},
                     "bgcolor": "white",
                     "steps": []
@@ -197,7 +224,6 @@ WINDOWS_TS = {"3m": 90, "1y": 365, "5y": 1825, "All": None}
 if "ts_window" not in st.session_state:
     st.session_state.ts_window = "1y"
 
-# Handle clicks before render
 for label in WINDOWS_TS:
     if st.session_state.get(f"btn_{label}"):
         st.session_state.ts_window = label
@@ -235,7 +261,7 @@ df_ts = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)
 fig_ts = go.Figure()
 fig_ts.add_trace(go.Scatter(
     x=df_ts["date"], y=df_ts["risk_score"],
-    mode="lines", name="Stress score",
+    mode="lines", name="Anomaly score",
     line=dict(color="#444", width=1.2)
 ))
 fig_ts.add_trace(go.Scatter(
@@ -248,14 +274,13 @@ fig_ts.update_layout(
     height=300, margin=dict(t=10, b=10, l=0, r=20),
     plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
     xaxis=dict(showgrid=False),
-    yaxis=dict(showgrid=True, gridcolor="#f0f0f0", title="Stress score")
+    yaxis=dict(showgrid=True, gridcolor="#f0f0f0", title="Anomaly score")
 )
 st.plotly_chart(fig_ts, use_container_width=True)
 
 st.divider()
 
-# --- Recent anomalies ---
-
+# --- Anomaly log ---
 with st.expander("Anomaly log", expanded=False):
     log_df = df[df["anomaly_static"]].sort_values("date", ascending=False).copy()
 
@@ -294,7 +319,6 @@ with st.expander("Anomaly log", expanded=False):
     )
 
 # --- Methodology ---
-
 with st.expander("Methodology", expanded=False):
     st.markdown("""
 The Macro Risk Monitor analyses daily energy market conditions across 21 signals spanning 

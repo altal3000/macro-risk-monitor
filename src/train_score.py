@@ -54,7 +54,7 @@ def load_features() -> pd.DataFrame:
     s3.download_file(S3_BUCKET, "features/features_window.parquet", "/tmp/features_window.parquet")
     df = pd.read_parquet("/tmp/features_window.parquet")
     df.index = pd.to_datetime(df.index)
-    df = df.ffill()  # fill rolling warm-up nulls on recent rows
+    df = df.ffill()
     logger.info(f"Loaded features: {df.shape}")
     return df
 
@@ -147,21 +147,24 @@ def ensemble(
     logger.info(f"Ensemble: mean={risk_score.mean():.3f}")
     return risk_score
 
-# --- Compute anomaly flags ---
-def compute_anomaly_flags(risk_score: pd.Series) -> pd.DataFrame:
+# --- Compute anomaly flags and thresholds ---
+def compute_anomaly_flags(risk_score: pd.Series) -> tuple:
     flags = pd.DataFrame(index=risk_score.index)
+    thresholds = pd.DataFrame(index=risk_score.index)
 
     flags["anomaly_static"] = risk_score > STATIC_THRESHOLD
+    thresholds["threshold_static"] = STATIC_THRESHOLD
 
     for name, window in ROLLING_WINDOWS.items():
         rolling_threshold = risk_score.rolling(window, min_periods=window//2).quantile(ROLLING_PERCENTILE)
         flags[f"anomaly_{name}"] = risk_score > rolling_threshold
+        thresholds[f"threshold_{name}"] = rolling_threshold
 
     logger.info(f"Anomaly rates — static: {flags['anomaly_static'].mean():.3f}, "
                 f"5y: {flags['anomaly_5y'].mean():.3f}, "
                 f"1y: {flags['anomaly_1y'].mean():.3f}, "
                 f"qtr: {flags['anomaly_qtr'].mean():.3f}")
-    return flags
+    return flags, thresholds
 
 # --- SHAP + z-score attribution ---
 def compute_shap(iso: IsolationForest, df: pd.DataFrame, features: list,
@@ -175,7 +178,7 @@ def compute_shap(iso: IsolationForest, df: pd.DataFrame, features: list,
     def rolling_zscore(series):
         mu = series.rolling(60).mean()
         sigma = series.rolling(60).std().clip(lower=1e-6)
-        return (series - mu) / sigma
+        return (series - mu) / series.rolling(60).std().clip(lower=1e-6)
 
     z_abs = scores_z_raw.apply(rolling_zscore).abs()
     z_norm = z_abs.div(z_abs.sum(axis=1), axis=0).fillna(0) * 0.35
@@ -198,6 +201,10 @@ def setup_duckdb() -> duckdb.DuckDBPyConnection:
             anomaly_5y          BOOLEAN,
             anomaly_1y          BOOLEAN,
             anomaly_qtr         BOOLEAN,
+            threshold_static    FLOAT,
+            threshold_5y        FLOAT,
+            threshold_1y        FLOAT,
+            threshold_qtr       FLOAT,
             scores_if           FLOAT,
             scores_z            FLOAT,
             scores_cp           FLOAT,
@@ -214,7 +221,9 @@ def setup_duckdb() -> duckdb.DuckDBPyConnection:
 # --- Write record ---
 def write_record(con: duckdb.DuckDBPyConnection, date: str, risk_score: float,
                  anomaly_static: bool, anomaly_5y: bool, anomaly_1y: bool,
-                 anomaly_qtr: bool, scores_if: float, scores_z: float,
+                 anomaly_qtr: bool, threshold_static: float, threshold_5y: float,
+                 threshold_1y: float, threshold_qtr: float,
+                 scores_if: float, scores_z: float,
                  scores_cp: float, top_drivers: pd.Series,
                  quality_flags: str, gpr_is_stale: bool, model_version: str) -> None:
 
@@ -222,7 +231,7 @@ def write_record(con: duckdb.DuckDBPyConnection, date: str, risk_score: float,
     drivers_values = top_drivers.sort_values(ascending=False).head(5).to_dict()
 
     con.execute("""
-        INSERT OR REPLACE INTO risk_scores VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO risk_scores VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         date,
         float(risk_score),
@@ -230,6 +239,10 @@ def write_record(con: duckdb.DuckDBPyConnection, date: str, risk_score: float,
         bool(anomaly_5y),
         bool(anomaly_1y),
         bool(anomaly_qtr),
+        float(threshold_static),
+        float(threshold_5y),
+        float(threshold_1y),
+        float(threshold_qtr),
         float(scores_if),
         float(scores_z),
         float(scores_cp),
@@ -249,8 +262,8 @@ if __name__ == "__main__":
 
     logger.info(f"Starting train/score — {TODAY}, scoring for {LAST_TRADING_DAY}")
 
-    df_full  = load_features()                          # full window including NaN rows
-    df_train = df_full.dropna(subset=ALL_FEATURES)      # clean rows for model training
+    df_full  = load_features()
+    df_train = df_full.dropna(subset=ALL_FEATURES)
 
     quality_flags = df_full["data_quality_flags"].iloc[-1]
     gpr_is_stale  = bool(df_full["gpr_is_stale"].iloc[-1])
@@ -263,7 +276,7 @@ if __name__ == "__main__":
         scores_cp      = compute_changepoint_signal(df_train)
 
         risk_score = ensemble(scores_if, scores_z, scores_cp)
-        flags      = compute_anomaly_flags(risk_score)
+        flags, thresholds = compute_anomaly_flags(risk_score)
         shap_df    = compute_shap(iso, df_train, reduced_features, df_train[reduced_features])
 
         mlflow.log_param("features_if", reduced_features)
@@ -283,7 +296,7 @@ if __name__ == "__main__":
             last_td = pd.Timestamp(LAST_TRADING_DAY)
             for date in df_train.index:
                 if date > last_td:
-                    continue  # skip today and future dates
+                    continue
                 date_str = date.strftime("%Y-%m-%d")
                 write_record(
                     con=con,
@@ -293,6 +306,10 @@ if __name__ == "__main__":
                     anomaly_5y=bool(flags.loc[date, "anomaly_5y"]),
                     anomaly_1y=bool(flags.loc[date, "anomaly_1y"]),
                     anomaly_qtr=bool(flags.loc[date, "anomaly_qtr"]),
+                    threshold_static=float(thresholds.loc[date, "threshold_static"]),
+                    threshold_5y=float(thresholds.loc[date, "threshold_5y"]),
+                    threshold_1y=float(thresholds.loc[date, "threshold_1y"]),
+                    threshold_qtr=float(thresholds.loc[date, "threshold_qtr"]),
                     scores_if=float(scores_if.loc[date]),
                     scores_z=float(scores_z.loc[date]),
                     scores_cp=float(scores_cp.loc[date]),
@@ -303,8 +320,6 @@ if __name__ == "__main__":
                 )
             logger.info(f"Backfill complete — {len(df_train)} rows written")
         else:
-            # Find the score for LAST_TRADING_DAY
-            # If it was dropped due to NaN, use the last available scored date
             score_date = pd.Timestamp(LAST_TRADING_DAY)
             if score_date not in risk_score.index:
                 score_date = risk_score.index[-1]
@@ -318,6 +333,10 @@ if __name__ == "__main__":
                 anomaly_5y=bool(flags.loc[score_date, "anomaly_5y"]),
                 anomaly_1y=bool(flags.loc[score_date, "anomaly_1y"]),
                 anomaly_qtr=bool(flags.loc[score_date, "anomaly_qtr"]),
+                threshold_static=float(thresholds.loc[score_date, "threshold_static"]),
+                threshold_5y=float(thresholds.loc[score_date, "threshold_5y"]),
+                threshold_1y=float(thresholds.loc[score_date, "threshold_1y"]),
+                threshold_qtr=float(thresholds.loc[score_date, "threshold_qtr"]),
                 scores_if=float(scores_if.loc[score_date]),
                 scores_z=float(scores_z.loc[score_date]),
                 scores_cp=float(scores_cp.loc[score_date]),
@@ -330,7 +349,6 @@ if __name__ == "__main__":
 
         con.close()
 
-        # Upload DuckDB to S3
         s3.upload_file(DB_PATH, S3_BUCKET, "macro_risk_monitor.duckdb")
         logger.info("DuckDB uploaded to S3")
 
