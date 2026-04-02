@@ -215,6 +215,17 @@ def setup_duckdb() -> duckdb.DuckDBPyConnection:
             model_version       VARCHAR
         )
     """)
+    # Schema migration — add missing columns if schema changed
+    existing = [r[0] for r in con.execute("DESCRIBE risk_scores").fetchall()]
+    for col, dtype in [
+        ("threshold_static", "FLOAT"),
+        ("threshold_5y",     "FLOAT"),
+        ("threshold_1y",     "FLOAT"),
+        ("threshold_qtr",    "FLOAT"),
+    ]:
+        if col not in existing:
+            con.execute(f"ALTER TABLE risk_scores ADD COLUMN {col} {dtype}")
+            logger.info(f"Schema migration: added column {col}")
     logger.info("DuckDB ready")
     return con
 
