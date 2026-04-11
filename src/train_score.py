@@ -300,7 +300,15 @@ if __name__ == "__main__":
         mlflow.log_metric("anomaly_rate_1y", float(flags["anomaly_1y"].mean()))
         run_id = mlflow.active_run().info.run_id
 
+        # Download existing DuckDB from S3 before connecting
+        try:
+            s3.download_file(S3_BUCKET, "macro_risk_monitor.duckdb", DB_PATH)
+            logger.info("Downloaded existing DuckDB from S3")
+        except Exception as e:
+            logger.info(f"No existing DuckDB on S3 — starting fresh: {e}")
+        
         con = setup_duckdb()
+        
 
         if args.backfill:
             logger.info("Backfilling all historical scores...")
