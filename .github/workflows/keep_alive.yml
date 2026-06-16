@@ -1,0 +1,24 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # 10:00 UTC daily, including weekends
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping dashboard
+        env:
+          STREAMLIT_URL: ${{ secrets.STREAMLIT_URL }}
+        run: |
+          if [ -z "$STREAMLIT_URL" ]; then
+            echo "STREAMLIT_URL secret not set — skipping ping"
+            exit 0
+          fi
+          STATUS=$(curl -fsS -o /dev/null -w "%{http_code}" -m 30 "$STREAMLIT_URL" 2>&1) || STATUS="failed"
+          echo "Dashboard responded: $STATUS"
+          if [ "$STATUS" = "failed" ] || [ "$STATUS" -ge 500 ] 2>/dev/null; then
+            echo "WARNING: dashboard did not respond — may need manual reactivation at $STREAMLIT_URL"
+          fi
